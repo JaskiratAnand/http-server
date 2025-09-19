@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"to-tcp/internal/headers"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -12,8 +13,9 @@ import (
 type parserState string
 
 const (
-	StateInit parserState = "init"
-	StateDone parserState = "done"
+	StateInit    parserState = "init"
+	StateHeaders parserState = "headers"
+	StateDone    parserState = "done"
 )
 
 type RequestLine struct {
@@ -28,12 +30,14 @@ func (r *RequestLine) ValidHTTPVersion() bool {
 
 type Request struct {
 	RequestLine RequestLine
+	Headers     headers.Headers
 	state       parserState
 }
 
 func newRequest() *Request {
 	return &Request{
-		state: StateInit,
+		state:   StateInit,
+		Headers: *headers.NewHeaders(),
 	}
 }
 
@@ -79,9 +83,11 @@ func (r *Request) parse(data []byte) (int, error) {
 
 outer:
 	for {
+		currentData := data[read:]
+
 		switch r.state {
 		case StateInit:
-			rl, n, err := parseRequestLine(data[read:])
+			rl, n, err := parseRequestLine(currentData)
 			if err != nil {
 				return 0, err
 			}
@@ -92,10 +98,27 @@ outer:
 
 			r.RequestLine = *rl
 			read += n
-			r.state = StateDone
+			r.state = StateHeaders
 
+		case StateHeaders:
+
+			n, done, err := r.Headers.Parse(currentData)
+			if err != nil {
+				return 0, err
+			}
+
+			if n == 0 {
+				break outer
+			}
+
+			read += n
+			if done {
+				r.state = StateDone
+			}
 		case StateDone:
 			break outer
+		default:
+			panic("bad programming")
 		}
 	}
 	return read, nil
