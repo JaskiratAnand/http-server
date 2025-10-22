@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"testing"
+	"strconv"
 	"to-tcp/internal/headers"
-
-	"github.com/stretchr/testify/assert"
 )
 
 type parserState string
@@ -15,7 +13,9 @@ type parserState string
 const (
 	StateInit    parserState = "init"
 	StateHeaders parserState = "headers"
+	StateBody    parserState = "body"
 	StateDone    parserState = "done"
+	StateError   parserState = "error"
 )
 
 type RequestLine struct {
@@ -31,23 +31,36 @@ func (r *RequestLine) ValidHTTPVersion() bool {
 type Request struct {
 	RequestLine RequestLine
 	Headers     headers.Headers
-	state       parserState
+	Body        string
+
+	state parserState
+}
+
+func getInt(headers *headers.Headers, name string, defaultValue int) int {
+	valueStr, exists := headers.Get(name)
+	if !exists {
+		return defaultValue
+	}
+
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return defaultValue
+	}
+	return value
 }
 
 func newRequest() *Request {
 	return &Request{
 		state:   StateInit,
 		Headers: *headers.NewHeaders(),
+		Body:    "",
 	}
-}
-
-func TestRequestLineParse(t *testing.T) {
-	assert.Equal(t, "TheTestagen", "TheTestagen")
 }
 
 var (
 	ErrMalformedRequestLine   = fmt.Errorf("malformed request-line")
 	ErrUnsupportedHTTPVersion = fmt.Errorf("unsupported http version")
+	ErrRequestInErrorState    = fmt.Errorf("request in error state")
 )
 
 var SEPARATOR = []byte("\r\n")
@@ -78,6 +91,12 @@ func parseRequestLine(b []byte) (*RequestLine, int, error) {
 	}, read, nil
 }
 
+func (r *Request) hasBody() bool {
+	// TODO update for chunk decoding
+	length := getInt(&r.Headers, "content-length", 0)
+	return length > 0
+}
+
 func (r *Request) parse(data []byte) (int, error) {
 	read := 0
 
@@ -86,9 +105,13 @@ outer:
 		currentData := data[read:]
 
 		switch r.state {
+		case StateError:
+			return 0, ErrRequestInErrorState
+
 		case StateInit:
 			rl, n, err := parseRequestLine(currentData)
 			if err != nil {
+				r.state = StateError
 				return 0, err
 			}
 
@@ -101,7 +124,6 @@ outer:
 			r.state = StateHeaders
 
 		case StateHeaders:
-
 			n, done, err := r.Headers.Parse(currentData)
 			if err != nil {
 				return 0, err
@@ -112,9 +134,35 @@ outer:
 			}
 
 			read += n
+
 			if done {
+				if r.hasBody() {
+					r.state = StateBody
+				} else {
+					r.state = StateDone
+				}
+			}
+
+		case StateBody:
+			length := getInt(&r.Headers, "content-length", 0)
+			if length == 0 {
+				r.state = StateDone
+				break
+			}
+			if len(currentData) == 0 {
+				break outer
+			}
+
+			remaining := min(length-len(r.Body), len(currentData))
+			r.Body += string(currentData[:remaining])
+			read += remaining
+
+			// slog.Info("parse#StateBody", "remaining", remaining, "body", r.Body, "read", read)
+
+			if len(r.Body) == length {
 				r.state = StateDone
 			}
+
 		case StateDone:
 			break outer
 		default:
@@ -128,7 +176,7 @@ func (r *Request) done() bool {
 	return r.state == StateDone
 }
 
-const bufferSize = 1024
+const bufferSize = 8096
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
 	request := newRequest()
@@ -137,6 +185,7 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 	buf := make([]byte, bufferSize)
 	bufLen := 0
 	for !request.done() {
+		// slog.Info("RequestFromReader", "state", request.state)
 		n, err := reader.Read(buf[bufLen:])
 		// TODO: handle edge cases
 		if err != nil {
