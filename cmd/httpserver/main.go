@@ -103,6 +103,7 @@ func main() {
 					}
 					w.WriteChunkedBodyDone()
 
+					// TODO: testing checksum and contentLength
 					sha256Checksum := sha256.Sum256(fullBody)
 					hexChecksum := hex.EncodeToString(sha256Checksum[:])
 
@@ -113,6 +114,15 @@ func main() {
 
 					return
 				}
+			case req.RequestLine.RequestTarget == "/video":
+				f, _ := os.ReadFile("assets/video.mp4")
+
+				h.Replace("Content-Type", "video/mp4")
+				h.Replace("Content-Length", fmt.Sprintf("%d", len(f)))
+
+				w.WriteStatusLine(response.StatusOK)
+				w.WriteHeaders(h)
+				w.WriteBody(f)
 			}
 
 			h.Replace("Content-Length", fmt.Sprintf("%d", len(body)))
