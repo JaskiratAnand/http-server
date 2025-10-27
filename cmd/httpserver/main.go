@@ -1,19 +1,26 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"to-tcp/internal/headers"
 	"to-tcp/internal/request"
 	"to-tcp/internal/response"
 	"to-tcp/internal/server"
 )
 
-const port = 42069
+const PORT int = 42069
 
-func resp400() []byte {
+const CHUNK_SIZE int = 1024
+
+func badReqResp() []byte {
 	return []byte(`<html>
   <head>
     <title>400 Bad Request</title>
@@ -24,7 +31,7 @@ func resp400() []byte {
   </body>
 </html>`)
 }
-func resp500() []byte {
+func internalErrResp() []byte {
 	return []byte(`<html>
   <head>
     <title>500 Internal Server Error</title>
@@ -35,7 +42,7 @@ func resp500() []byte {
   </body>
 </html>`)
 }
-func resp200() []byte {
+func okResp() []byte {
 	return []byte(`<html>
   <head>
     <title>200 OK</title>
@@ -49,19 +56,63 @@ func resp200() []byte {
 
 func main() {
 	s, err := server.Serve(
-		port,
+		PORT,
 		func(w *response.Writer, req *request.Request) {
 			h := response.GetDefaultHeaders(0)
-			body := resp200()
+			body := okResp()
 			status := response.StatusOK
 
-			switch req.RequestLine.RequestTarget {
-			case "/yourproblem":
-				body = resp400()
+			switch {
+			case req.RequestLine.RequestTarget == "/badRequest":
+				body = badReqResp()
 				status = response.StatusBadRequest
-			case "/myproblem":
-				body = resp500()
+			case req.RequestLine.RequestTarget == "/internalErr":
+				body = internalErrResp()
 				status = response.StatusInternalServerErr
+			case strings.HasPrefix(req.RequestLine.RequestTarget, "/httpbin/stream"):
+				target := req.RequestLine.RequestTarget
+
+				httpbinRes, err := http.Get("https://httpbin.org/" + target[len("/httpbin/"):])
+				if err != nil {
+					body = internalErrResp()
+					status = response.StatusInternalServerErr
+				} else {
+					// chunked response
+					w.WriteStatusLine(status)
+
+					h.Delete("Content-Length")
+					h.Set("Transfer-Encoding", "chunked")
+					h.Replace("Content-Type", "text/plain")
+					h.Set("Trailer", "X-Content-SHA256")
+					h.Set("Trailer", "X-Content-Length")
+
+					w.WriteHeaders(h)
+
+					fullBody := []byte{}
+					chunk := make([]byte, CHUNK_SIZE)
+					for {
+						n, err := httpbinRes.Body.Read(chunk)
+						if n > 0 {
+							w.WriteChunkedBody(chunk, n)
+						}
+						if err != nil {
+							break
+						}
+
+						fullBody = append(fullBody, chunk[:n]...)
+					}
+					w.WriteChunkedBodyDone()
+
+					sha256Checksum := sha256.Sum256(fullBody)
+					hexChecksum := hex.EncodeToString(sha256Checksum[:])
+
+					trailers := headers.NewHeaders()
+					trailers.Set("X-Content-SHA256", hexChecksum)
+					trailers.Set("X-Content-Length", fmt.Sprintf("%d", len(fullBody)))
+					w.WriteHeaders(trailers)
+
+					return
+				}
 			}
 
 			h.Replace("Content-Length", fmt.Sprintf("%d", len(body)))
@@ -75,7 +126,7 @@ func main() {
 		log.Fatalf("Error starting server: %v", err)
 	}
 	defer s.Close()
-	log.Println("Server started on port", port)
+	log.Println("Server started on port", PORT)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

@@ -3,6 +3,7 @@ package response
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"to-tcp/internal/headers"
 )
 
@@ -83,6 +84,41 @@ func (w *Writer) WriteHeaders(h *headers.Headers) error {
 
 func (w *Writer) WriteBody(p []byte) (int, error) {
 	n, err := w.writer.Write(p)
-
 	return n, err
 }
+
+func (w *Writer) WriteChunkedBody(p []byte, n int) (int, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+
+	var sizeBuf [16]byte
+	size := strconv.AppendInt(sizeBuf[:0], int64(n), 16) // size in hex
+
+	// combined buffer
+	buf := make([]byte, 0, len(size)+2+n+2)
+
+	buf = append(buf, size...)
+	buf = append(buf, "\r\n"...)
+	buf = append(buf, p[:n]...)
+	buf = append(buf, "\r\n"...)
+
+	_, err := w.writer.Write(buf)
+	return n, err
+}
+
+func (w *Writer) WriteChunkedBodyDone() (int, error) {
+	n, err := w.writer.Write([]byte("0\r\n"))
+	return n, err
+}
+
+// func (w *Writer) WriteTrailers(h *headers.Headers) error {
+// 	b := []byte{}
+// 	h.ForEach(func(n, v string) {
+// 		b = fmt.Appendf(b, "%s: %s\r\n", n, v)
+// 	})
+// 	b = fmt.Append(b, "\r\n")
+
+// 	_, err := w.writer.Write(b)
+// 	return err
+// }
